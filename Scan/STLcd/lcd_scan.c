@@ -32,6 +32,7 @@
 
 // Local Includes
 #include "lcd_scan.h"
+#include "font.h"
 
 
 
@@ -40,6 +41,9 @@
 #define LCD_TOTAL_VISIBLE_PAGES 4
 #define LCD_TOTAL_PAGES 9
 #define LCD_PAGE_LEN 128
+#define LCD_MAX_MARKERS 4
+#define LCD_BUF_SIZE LCD_TOTAL_VISIBLE_PAGES * LCD_PAGE_LEN
+#define LCD_TEXT_SIZE 8
 
 
 
@@ -52,21 +56,35 @@
 
 // ----- Structs -----
 
+typedef struct LCD_stack {
+	uint8_t layersCount;  // How many layers should be displayed
+	uint16_t layers[4];
+} LCD_stack;
+
+typedef struct LCD_state {
+	bool markerOn[LCD_MAX_MARKERS];
+	LCD_stack stack;
+	unsigned char text1[LCD_TEXT_SIZE];
+	unsigned char text2[LCD_TEXT_SIZE];
+} LCD_state;
+
 // ----- Function Declarations -----
+
+void LCD_redrawDisplay( LCD_state *newState );
 
 // CLI Functions
 void cliFunc_lcdCmd  ( char* args );
 void cliFunc_lcdColor( char* args );
 void cliFunc_lcdDisp ( char* args );
 void cliFunc_lcdInit ( char* args );
-void cliFunc_lcdTest ( char* args );
+void cliFunc_lcdText ( char* args );
 
 
 
 // ----- Variables -----
 
-// Default Image - Displays on startup
-const uint8_t STLcdDefaultImage[] = { STLcdDefaultImage_define };
+// Current state of the LCD display, use to properly redraw the display.
+LCD_state currentState;
 
 // Full Toggle State
 uint8_t cliFullToggleState = 0;
@@ -79,14 +97,14 @@ CLIDict_Entry( lcdCmd,      "Send byte via SPI, second argument enables a0. Defa
 CLIDict_Entry( lcdColor,    "Set backlight color. 3 16-bit numbers: R G B. i.e. 0xFFF 0x1444 0x32" );
 CLIDict_Entry( lcdDisp,     "Write byte(s) to given page starting at given address. i.e. 0x1 0x5 0xFF 0x00" );
 CLIDict_Entry( lcdInit,     "Re-initialize the LCD display." );
-CLIDict_Entry( lcdTest,     "Test out the LCD display." );
+CLIDict_Entry( lcdText,     "Set the text on the LCD, two rows are supported, each 8 characters." );
 
 CLIDict_Def( lcdCLIDict, "ST LCD Module Commands" ) = {
 	CLIDict_Item( lcdCmd ),
 	CLIDict_Item( lcdColor ),
 	CLIDict_Item( lcdDisp ),
 	CLIDict_Item( lcdInit ),
-	CLIDict_Item( lcdTest ),
+	CLIDict_Item( lcdText ),
 	{ 0, 0, 0 } // Null entry for dictionary end
 };
 
@@ -290,9 +308,10 @@ inline void LCD_setup()
 	// Run LCD intialization sequence
 	LCD_initialize();
 
-	// Write default image to LCD
-	for ( uint8_t page = 0; page < LCD_TOTAL_VISIBLE_PAGES; page++ )
-		LCD_writeDisplayReg( page, (uint8_t*)&STLcdDefaultImage[page * LCD_PAGE_LEN], LCD_PAGE_LEN );
+	// Redraw display
+	memcpy( &currentState.text1, "        ", LCD_TEXT_SIZE );
+	memcpy( &currentState.text2, "        ", LCD_TEXT_SIZE );
+	LCD_redrawDisplay( &currentState );
 
 	// Setup Backlight
 	SIM_SCGC6 |= SIM_SCGC6_FTM0;
@@ -353,30 +372,23 @@ void LCD_currentChange( unsigned int current )
 	// TODO - Power savings?
 }
 
-
-
-// ----- Capabilities -----
-
-// Takes 1 8 bit length and 4 16 bit arguments, each corresponding to a layer index
-// Ordered from top to bottom
-// The first argument indicates how many numbers to display (max 4), set to 0 to load default image
-uint16_t LCD_layerStackExact[4];
-uint8_t LCD_layerStackExact_size = 0;
-typedef struct LCD_layerStackExact_args {
-	uint8_t numArgs;
-	uint16_t layers[4];
-} LCD_layerStackExact_args;
-void LCD_layerStackExact_capability( uint8_t state, uint8_t stateType, uint8_t *args )
+void LCD_drawText( uint8_t *spot, const unsigned char *text, const uint8_t len )
 {
-	// Display capability name
-	if ( stateType == 0xFF && state == 0xFF )
+	for ( uint8_t i = 0; i < len; i++ )
 	{
-		print("LCD_layerStackExact_capability(num,layer1,layer2,layer3,layer4)");
-		return;
+		memcpy(
+			spot + sizeof( font[0] ) * i,
+			&font[ text[i] - ' ' ],
+			sizeof( font[0] )
+		);
 	}
+}
 
-	// Read arguments
-	LCD_layerStackExact_args *stack_args = (LCD_layerStackExact_args*)args;
+// Draw buffer
+uint8_t buffer[ LCD_BUF_SIZE ];
+void LCD_redrawDisplay( LCD_state *newState )
+{
+	currentState = *newState;
 
 	// Number data for LCD
 	const uint8_t numbers[10][128] = {
@@ -406,70 +418,175 @@ void LCD_layerStackExact_capability( uint8_t state, uint8_t stateType, uint8_t *
 		{ STLcdNumber9Color_define },
 	};
 
-	// Only display if there are layers active
-	if ( stack_args->numArgs > 0 )
-	{
-		// Set the color according to the "top-of-stack" layer
-		uint16_t layerIndex = stack_args->layers[0];
-		FTM0_C0V = colors[ layerIndex ][0];
-		FTM0_C1V = colors[ layerIndex ][1];
-		FTM0_C2V = colors[ layerIndex ][2];
+	const uint8_t markers[2][7] = {
+		{ 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE },
+		{ 0xFE, 0x82, 0x82, 0x82, 0x82, 0x82, 0xFE },
+	};
 
-		// Iterate through each of the pages
-		// XXX Many of the values here are hard-coded
-		//     Eventually a proper font rendering engine should take care of things like this... -HaaTa
-		for ( uint8_t page = 0; page < LCD_TOTAL_VISIBLE_PAGES; page++ )
-		{
-			// Set the register page
-			LCD_writeControlReg( 0xB0 | ( 0x0F & page ) );
+	bool any_marker_on = false;
+	for ( uint8_t i = 0; i < LCD_MAX_MARKERS; i++ )
+		any_marker_on |= currentState.markerOn[ i ] != 0;
 
-			// Set starting address
-			LCD_writeControlReg( 0x10 );
-			LCD_writeControlReg( 0x00 );
+	memset( buffer, 0, LCD_BUF_SIZE );
 
-			// Write data
-			for ( uint16_t layer = 0; layer < stack_args->numArgs; layer++ )
-			{
-				layerIndex = stack_args->layers[ layer ];
-
-				// Default to 0, if over 9
-				if ( layerIndex > 9 )
-				{
-					layerIndex = 0;
-				}
-
-				// Write page of number to display
-				SPI_write( (uint8_t*)&numbers[ layerIndex ][ page * 32 ], 32 );
-			}
-
-			// Blank out rest of display
-			uint8_t data = 0;
-			for ( uint8_t c = 0; c < 4 - stack_args->numArgs; c++ )
-			{
-				for ( uint8_t byte = 0; byte < 32; byte++ )
-				{
-					SPI_write( &data, 1 );
-				}
-			}
-		}
-	}
-	else
+	if ( !any_marker_on && currentState.stack.layersCount == 0 )
 	{
 		// Set default backlight
 		FTM0_C0V = STLcdBacklightRed_define;
 		FTM0_C1V = STLcdBacklightGreen_define;
 		FTM0_C2V = STLcdBacklightBlue_define;
-
-		// Write default image
-		for ( uint8_t page = 0; page < LCD_TOTAL_VISIBLE_PAGES; page++ )
-			LCD_writeDisplayReg( page, (uint8_t *)&STLcdDefaultImage[page * LCD_PAGE_LEN], LCD_PAGE_LEN );
 	}
+	else if ( any_marker_on && currentState.stack.layersCount == 0 )
+	{
+		// Set background for markers only
+		FTM0_C0V = STLcdMarkerBacklightRed_define;
+		FTM0_C1V = STLcdMarkerBacklightGreen_define;
+		FTM0_C2V = STLcdMarkerBacklightBlue_define;
+	}
+	else
+	{
+		// Set the color according to the "top-of-stack" layer
+		uint16_t layerIndex = currentState.stack.layers[0];
+		FTM0_C0V = colors[ layerIndex ][0];
+		FTM0_C1V = colors[ layerIndex ][1];
+		FTM0_C2V = colors[ layerIndex ][2];
+	}
+
+	// Dump 1st line of text
+	{
+		uint8_t pos = 128 - LCD_TEXT_SIZE * sizeof( font[0] );
+		uint8_t *spot1 = &buffer[ 3 * 128 + pos ];
+		LCD_drawText( spot1, currentState.text1, LCD_TEXT_SIZE );
+		uint8_t *spot2 = &buffer[ 2 * 128 + pos ];
+		LCD_drawText( spot2, currentState.text2, LCD_TEXT_SIZE );
+	}
+
+	// First dump marker information
+	if ( any_marker_on )
+	{
+		uint8_t page = 0;
+		for ( uint8_t marker = 0; marker < LCD_MAX_MARKERS; marker++ )
+		{
+			uint8_t pos = (LCD_MAX_MARKERS - marker - 1) * 8;
+			uint8_t *spot = &buffer[ page * 128 + 96 + pos ];
+			memcpy(
+				spot,
+				&markers[ !currentState.markerOn[ marker ] ],
+				sizeof( markers[0] )
+			);
+		}
+	}
+
+	// Now dump layer information
+	for ( uint8_t page = 0; page < LCD_TOTAL_VISIBLE_PAGES; page++ )
+	{
+		uint8_t *spot = &buffer[ page * 128 ];
+
+		// Write data
+		for ( uint16_t layer = 0; layer < currentState.stack.layersCount; layer++ )
+		{
+			uint16_t layerIndex = currentState.stack.layers[ layer ];
+
+			// Default to 0, if over 9
+			if ( layerIndex > 9 )
+				layerIndex = 0;
+
+			memcpy(
+				spot + 32 * layer,
+				&numbers[ layerIndex ][ page * 32 ],
+				32 );
+		}
+	}
+
+	// Write buffer to the display
+	for ( uint8_t page = 0; page < LCD_TOTAL_VISIBLE_PAGES; page++ )
+		LCD_writeDisplayReg(
+			page, 
+			&buffer[page * LCD_PAGE_LEN],
+			LCD_PAGE_LEN
+		);
+}
+
+
+// ----- Capabilities -----
+
+// A simple state markers, e.g. can be used as CapsLock indicator.
+typedef struct LCD_marker_args {
+	uint8_t num;  // [0, 4]
+	uint8_t status;  // Values - 0: off, 1: on, 2: toggle
+} LCD_marker_args;
+void LCD_markerToggle_capability( uint8_t state, uint8_t stateType, uint8_t *args )
+{
+	if ( stateType == 0xFF && state == 0xFF )
+	{
+		print("LCD_markerToggle_capability(num,status)");
+	}
+
+	// Read arguments
+	LCD_marker_args marker_args = *(LCD_marker_args*)args;
+
+	LCD_state newState = currentState;
+	bool *markerOn = &newState.markerOn[marker_args.num];
+
+	// Handle the toggle
+	if ( marker_args.status == 2 )
+	{
+		if ( stateType != 0 || state != 0x03 )
+		{
+			return;
+		}
+		marker_args.status = !*markerOn;
+	}
+
+	// Set status of the marker
+	*markerOn = !!marker_args.status;
+
+	if ( memcmp( &newState, &currentState, sizeof( currentState ) ) == 0 )
+		return;
+
+	// Only deal with the interconnect if it has been compiled in
+#if defined(ConnectEnabled_define)
+	if ( Connect_master )
+	{
+		// generatedKeymap.h
+		extern const Capability CapabilitiesList[];
+
+		// Broadcast layerStackExact remote capability (0xFF is the broadcast id)
+		Connect_send_RemoteCapability(
+			0xFF,
+			LCD_markerToggle_capability_index,
+			state,
+			stateType,
+			CapabilitiesList[ LCD_markerToggle_capability_index ].argCount,
+			(uint8_t*)&marker_args
+		);
+	}
+#endif
+
+	LCD_redrawDisplay(&newState);
+}
+
+// Takes 1 8 bit length and 4 16 bit arguments, each corresponding to a layer index
+// Ordered from top to bottom
+// The first argument indicates how many numbers to display (max 4), set to 0 to load default image
+void LCD_layerStackExact_capability( uint8_t state, uint8_t stateType, uint8_t *args )
+{
+	// Display capability name
+	if ( stateType == 0xFF && state == 0xFF )
+	{
+		print("LCD_layerStackExact_capability(num,layer1,layer2,layer3,layer4)");
+		return;
+	}
+
+	LCD_stack *newStack = (LCD_stack*)args;
+
+	LCD_state newState = currentState;
+	newState.stack = *newStack;
+
+	LCD_redrawDisplay(&newState);
 }
 
 // Determines the current layer stack, and sets the LCD output accordingly
-// Will only work on a master node when using the interconnect (use LCD_layerStackExact_capability instead)
-uint16_t LCD_layerStack_prevSize = 0;
-uint16_t LCD_layerStack_prevTop  = 0;
 void LCD_layerStack_capability( uint8_t state, uint8_t stateType, uint8_t *args )
 {
 	// Display capability name
@@ -479,29 +596,23 @@ void LCD_layerStack_capability( uint8_t state, uint8_t stateType, uint8_t *args 
 		return;
 	}
 
+	LCD_stack newStack = currentState.stack;
+
 	// Parse the layer stack, top to bottom
 	extern uint16_t macroLayerIndexStack[];
 	extern uint16_t macroLayerIndexStackSize;
 
-	// Ignore if the stack size hasn't changed and the top of the stack is the same
-	if ( macroLayerIndexStackSize == LCD_layerStack_prevSize
-		&& macroLayerIndexStack[macroLayerIndexStackSize - 1] == LCD_layerStack_prevTop )
+	memset( &newStack, 0, sizeof( newStack ) );
+
+	newStack.layersCount = macroLayerIndexStackSize;
+	for ( uint16_t layer = 1; layer <= newStack.layersCount; layer++ )
 	{
+		newStack.layers[ layer - 1 ] =
+			macroLayerIndexStack[ macroLayerIndexStackSize - layer ];
+	}
+
+	if ( memcmp( &newStack, &currentState.stack, sizeof( currentState.stack ) ) == 0 )
 		return;
-	}
-	LCD_layerStack_prevSize = macroLayerIndexStackSize;
-	LCD_layerStack_prevTop  = macroLayerIndexStack[macroLayerIndexStackSize - 1];
-
-	LCD_layerStackExact_args stack_args;
-	memset( stack_args.layers, 0, sizeof( stack_args.layers ) );
-
-	// Use the LCD_layerStackExact_capability to set the LCD using the determined stack
-	// Construct argument set for capability
-	stack_args.numArgs = macroLayerIndexStackSize;
-	for ( uint16_t layer = 1; layer <= macroLayerIndexStackSize; layer++ )
-	{
-		stack_args.layers[ layer - 1 ] = macroLayerIndexStack[ macroLayerIndexStackSize - layer ];
-	}
 
 	// Only deal with the interconnect if it has been compiled in
 #if defined(ConnectEnabled_define)
@@ -517,12 +628,12 @@ void LCD_layerStack_capability( uint8_t state, uint8_t stateType, uint8_t *args 
 			state,
 			stateType,
 			CapabilitiesList[ LCD_layerStackExact_capability_index ].argCount,
-			(uint8_t*)&stack_args
+			(uint8_t*)&newStack
 		);
 	}
 #endif
-	// Call LCD_layerStackExact directly
-	LCD_layerStackExact_capability( state, stateType, (uint8_t*)&stack_args );
+
+	LCD_layerStackExact_capability( state, stateType, (uint8_t*)&newStack );
 }
 
 
@@ -532,13 +643,6 @@ void LCD_layerStack_capability( uint8_t state, uint8_t stateType, uint8_t *args 
 void cliFunc_lcdInit( char* args )
 {
 	LCD_initialize();
-}
-
-void cliFunc_lcdTest( char* args )
-{
-	// Write default image
-	for ( uint8_t page = 0; page < LCD_TOTAL_VISIBLE_PAGES; page++ )
-		LCD_writeDisplayReg( page, (uint8_t *)&STLcdDefaultImage[page * LCD_PAGE_LEN], LCD_PAGE_LEN );
 }
 
 void cliFunc_lcdCmd( char* args )
@@ -650,3 +754,12 @@ void cliFunc_lcdDisp( char* args )
 	}
 }
 
+void cliFunc_lcdText( char* args )
+{
+	LCD_state newState = currentState;
+
+	memcpy( newState.text1, args, LCD_TEXT_SIZE );
+	memcpy( newState.text2, args + LCD_TEXT_SIZE, LCD_TEXT_SIZE );
+
+	LCD_redrawDisplay(&newState);
+}

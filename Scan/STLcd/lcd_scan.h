@@ -20,6 +20,7 @@
 
 // Compiler Includes
 #include <stdint.h>
+#include <stdbool.h>
 
 
 
