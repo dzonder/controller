@@ -17,7 +17,7 @@ sleep 0.02
 
 while true; do
 	TEXT1=`date "+%H:%M:%S"`
-	TEXT2=`who am i | awk '{print $1}'`
+	TEXT2=`logname`
 	printf "lcdText %8s%8s\r" $TEXT1 $TEXT2 > $SERIALPORT
 	sleep 0.25
 done
