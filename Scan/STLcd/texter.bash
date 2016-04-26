@@ -18,6 +18,12 @@ sleep 0.02
 while true; do
 	TEXT1=`date "+%H:%M:%S"`
 	TEXT2=`logname`
+	STATE0=`xset q | grep 'Caps Lock' | awk '{ n= $4=="on"; print n }'`
+	STATE1=`xset q | grep 'Num Lock' | awk '{ n= $8=="on"; print n }'`
 	printf "lcdText %8s%8s\r" $TEXT1 $TEXT2 > $SERIALPORT
-	sleep 0.25
+	sleep 0.02
+	printf "lcdMarkerToggle 0 $STATE0\r" > $SERIALPORT
+	sleep 0.02
+	printf "lcdMarkerToggle 1 $STATE1\r" > $SERIALPORT
+	sleep 0.21
 done

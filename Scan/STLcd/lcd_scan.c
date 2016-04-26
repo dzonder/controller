@@ -73,11 +73,12 @@ typedef struct LCD_state {
 void LCD_redrawDisplay( LCD_state *newState );
 
 // CLI Functions
-void cliFunc_lcdCmd  ( char* args );
-void cliFunc_lcdColor( char* args );
-void cliFunc_lcdDisp ( char* args );
-void cliFunc_lcdInit ( char* args );
-void cliFunc_lcdText ( char* args );
+void cliFunc_lcdCmd          ( char* args );
+void cliFunc_lcdColor        ( char* args );
+void cliFunc_lcdDisp         ( char* args );
+void cliFunc_lcdInit         ( char* args );
+void cliFunc_lcdText         ( char* args );
+void cliFunc_lcdMarkerToggle ( char* args );
 
 
 
@@ -93,11 +94,12 @@ uint8_t cliFullToggleState = 0;
 uint8_t cliNormalReverseToggleState = 0;
 
 // Scan Module command dictionary
-CLIDict_Entry( lcdCmd,      "Send byte via SPI, second argument enables a0. Defaults to control." );
-CLIDict_Entry( lcdColor,    "Set backlight color. 3 16-bit numbers: R G B. i.e. 0xFFF 0x1444 0x32" );
-CLIDict_Entry( lcdDisp,     "Write byte(s) to given page starting at given address. i.e. 0x1 0x5 0xFF 0x00" );
-CLIDict_Entry( lcdInit,     "Re-initialize the LCD display." );
-CLIDict_Entry( lcdText,     "Set the text on the LCD, two rows are supported, each 8 characters." );
+CLIDict_Entry( lcdCmd,          "Send byte via SPI, second argument enables a0. Defaults to control." );
+CLIDict_Entry( lcdColor,        "Set backlight color. 3 16-bit numbers: R G B. i.e. 0xFFF 0x1444 0x32" );
+CLIDict_Entry( lcdDisp,         "Write byte(s) to given page starting at given address. i.e. 0x1 0x5 0xFF 0x00" );
+CLIDict_Entry( lcdInit,         "Re-initialize the LCD display." );
+CLIDict_Entry( lcdText,         "Set the text on the LCD, two rows are supported, each 8 characters." );
+CLIDict_Entry( lcdMarkerToggle, "Toggle the marker (by number to status)." );
 
 CLIDict_Def( lcdCLIDict, "ST LCD Module Commands" ) = {
 	CLIDict_Item( lcdCmd ),
@@ -105,6 +107,7 @@ CLIDict_Def( lcdCLIDict, "ST LCD Module Commands" ) = {
 	CLIDict_Item( lcdDisp ),
 	CLIDict_Item( lcdInit ),
 	CLIDict_Item( lcdText ),
+	CLIDict_Item( lcdMarkerToggle ),
 	{ 0, 0, 0 } // Null entry for dictionary end
 };
 
@@ -419,8 +422,8 @@ void LCD_redrawDisplay( LCD_state *newState )
 	};
 
 	const uint8_t markers[2][7] = {
-		{ 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE },
 		{ 0xFE, 0x82, 0x82, 0x82, 0x82, 0x82, 0xFE },
+		{ 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE },
 	};
 
 	bool any_marker_on = false;
@@ -471,7 +474,7 @@ void LCD_redrawDisplay( LCD_state *newState )
 			uint8_t *spot = &buffer[ page * 128 + 96 + pos ];
 			memcpy(
 				spot,
-				&markers[ !currentState.markerOn[ marker ] ],
+				&markers[ currentState.markerOn[ marker ] ],
 				sizeof( markers[0] )
 			);
 		}
@@ -512,7 +515,7 @@ void LCD_redrawDisplay( LCD_state *newState )
 
 // A simple state markers, e.g. can be used as CapsLock indicator.
 typedef struct LCD_marker_args {
-	uint8_t num;  // [0, 4]
+	uint8_t num;  // [0, 3]
 	uint8_t status;  // Values - 0: off, 1: on, 2: toggle
 } LCD_marker_args;
 void LCD_markerToggle_capability( uint8_t state, uint8_t stateType, uint8_t *args )
@@ -762,4 +765,31 @@ void cliFunc_lcdText( char* args )
 	memcpy( newState.text2, args + LCD_TEXT_SIZE, LCD_TEXT_SIZE );
 
 	LCD_redrawDisplay(&newState);
+}
+
+void cliFunc_lcdMarkerToggle( char* args )
+{
+	LCD_marker_args markerArgs;
+	char* curArgs;
+	char* arg1Ptr;
+	char* arg2Ptr = args;
+
+	// Process num and status arguments
+	curArgs = arg2Ptr;
+	CLI_argumentIsolation( curArgs, &arg1Ptr, &arg2Ptr );
+
+	// Stop processing args if no more are found
+	if ( *arg1Ptr == '\0' )
+		return;
+	markerArgs.num = numToInt( arg1Ptr );
+
+	curArgs = arg2Ptr;
+	CLI_argumentIsolation( curArgs, &arg1Ptr, &arg2Ptr );
+
+	// Stop processing args if no more are found
+	if ( *arg1Ptr == '\0' )
+		return;
+	markerArgs.status = numToInt( arg1Ptr );
+
+	LCD_markerToggle_capability( 0x03, 0, (uint8_t*)&markerArgs );
 }
